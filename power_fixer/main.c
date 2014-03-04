@@ -352,7 +352,7 @@ static uint64_t find_patch_place()
     }
     if (found_count > 1)
     {
-        LOG_ERROR("Several instructions with the same pattern.");
+        LOG_ERROR("Several instructions with the same pattern");
         return 0;
     }
     return patch_place - text_section;
@@ -360,8 +360,7 @@ static uint64_t find_patch_place()
 
 int main(int argc, char **argv)
 {
-    printf("power_fixer v%s, by binchewer\n------------------------------\n\n", VERSION);
-    printf("OS X %s compatible version by deuiore\n\n", OSX_VERSION);
+    printf("power_fixer v%s, by binchewer\nOS X %s compatible version by deuiore\n-----------------------------------------\n\n", VERSION, OSX_VERSION);
     pid_t pid = 0;
     while ((pid = get_process_pid("loginwindow", pid)))
     {
