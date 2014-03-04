@@ -11,6 +11,7 @@
 typedef struct kinfo_proc kinfo_proc;
 
 #define VERSION "0.1"
+#define OSX_VERSION "10.9.2"
 #define LOG_ERROR(fmt, ...) fprintf(stderr, "[ERROR] " fmt " (%s, %d)\n", ## __VA_ARGS__, __func__, __LINE__);
 
 vm_map_t loginwindow_task;
@@ -146,7 +147,7 @@ static int readmem(mach_vm_address_t address, mach_vm_size_t size, mach_vm_offse
     return 1;
 }
 
-static int write_memory_int(uint64_t opts_address, uint64_t value)
+static int write_memory_byte(uint64_t opts_address, uint64_t value)
 {
     printf("Writing value %08llx to address %llx.\n", value, opts_address);
     kern_return_t kr = 0;
@@ -162,22 +163,22 @@ static int write_memory_int(uint64_t opts_address, uint64_t value)
         LOG_ERROR("mach_vm_region failed with error %d", kr);
         return 0;
     }
-
+    
     /* change protections, write, and restore original protection */
     task_suspend(loginwindow_task);
-    if ( (kr = mach_vm_protect(loginwindow_task, opts_address, (mach_msg_type_number_t)4, FALSE, VM_PROT_WRITE | VM_PROT_READ | VM_PROT_COPY)) )
+    if ( (kr = mach_vm_protect(loginwindow_task, opts_address, (mach_msg_type_number_t)1, FALSE, VM_PROT_WRITE | VM_PROT_READ | VM_PROT_COPY)) )
     {
         LOG_ERROR("mach_vm_protect failed with error %d.", kr);
         return 0;
     }
-
-    if ( (kr = mach_vm_write(loginwindow_task, opts_address, (vm_offset_t)&value, (mach_msg_type_number_t)4)) )
+    
+    if ( (kr = mach_vm_write(loginwindow_task, opts_address, (vm_offset_t)&value, (mach_msg_type_number_t)1)) )
     {
         LOG_ERROR("mach_vm_write failed at 0x%llx with error %d.", opts_address, kr);
         return 0;
     }
     /* restore original protection */
-    if ( (kr = mach_vm_protect(loginwindow_task, opts_address, (mach_msg_type_number_t)4, FALSE, info.protection)) )
+    if ( (kr = mach_vm_protect(loginwindow_task, opts_address, (mach_msg_type_number_t)1, FALSE, info.protection)) )
     {
         LOG_ERROR("mach_vm_protect failed with error %d.", kr);
         return 0;
@@ -307,24 +308,6 @@ static void get_main_text_segment()
     }
 }
 
-static double get_relative_double(uint8_t *position)
-{
-    double result = 0.0;
-    uint64_t offset = position - text_section + (*(uint32_t *)(position)) + 4;
-    if (offset + 8 <= text_size)
-    {
-        result = *(double *)(text_section + offset);
-    }
-    else
-    {
-        if (!readmem(base_address + text_offset + offset, 8, (mach_vm_offset_t*)&result))
-        {
-            result = 0.0;
-        }
-    }
-    return result;
-}
-
 static void find_binary_pattern(void *pattern, uint32_t pattern_size, uint8_t ***matches, uint32_t *count, uint64_t from)
 {
     *count = 0;
@@ -349,21 +332,18 @@ static void find_binary_pattern(void *pattern, uint32_t pattern_size, uint8_t **
     }
 }
 
-//returns the offset to instruction 'movsd xmm0, 1.5' within __text section
+//returns the offset to instructions 'mov rdi, qword [ds:objc_cls_ref_NSTimer]; movsd xmm0, qword [ss:rbp-0x30]' within __text section
 static uint64_t find_patch_place()
 {
     uint8_t **matches = 0;
     uint32_t count = 0;
     uint32_t found_count = 0;
     uint8_t *patch_place = 0;
-    find_binary_pattern("\xF2\x0F\x10\x05", 4, &matches, &count, 0);
+    find_binary_pattern("\x48\x8B\x3D\x15\x06\x06\x00\xF2\x0F\x10\x45\xD0", 12, &matches, &count, 0);
     for (int i = 0; i < count; i++)
     {
-        if (get_relative_double(matches[i]+4) == 1.5)
-        {
-            patch_place = matches[i];
-            found_count += 1;
-        }
+        patch_place = matches[i];
+        found_count += 1;
     }
     if (found_count == 0)
     {
@@ -372,33 +352,16 @@ static uint64_t find_patch_place()
     }
     if (found_count > 1)
     {
-        LOG_ERROR("Several instructions 'movsd xmm0, 1.5'");
+        LOG_ERROR("Several instructions with the same pattern.");
         return 0;
     }
     return patch_place - text_section;
 }
 
-static uint64_t find_small_double(uint64_t from)
-{
-    char pattern[] = "aaaa";
-    for (int i = 0x3f18; i < 0x3f74; i++)
-    {
-        *(int *)(&pattern) = i;
-        uint8_t **result;
-        uint32_t count;
-        find_binary_pattern(pattern, 2, &result, &count, from);
-        if (count)
-        {
-            return result[0] - 6 - text_section;
-        }
-    }
-    LOG_ERROR("Unable to locate new timeinterval gadgets :(");
-    return 0;
-}
-
 int main(int argc, char **argv)
 {
     printf("power_fixer v%s, by binchewer\n------------------------------\n\n", VERSION);
+    printf("OS X %s compatible version by deuiore\n\n", OSX_VERSION);
     pid_t pid = 0;
     while ((pid = get_process_pid("loginwindow", pid)))
     {
@@ -434,14 +397,13 @@ int main(int argc, char **argv)
         {
             continue;
         }
-        printf("Found potential timer setup at %016llx\n", (base_address + text_offset + patch_place));
-        uint64_t gadget = find_small_double(patch_place + 8);
-        if (gadget == 0)
-        {
-            continue;
-        }
-        printf("Found new timer value at %016llx: %lf\n", base_address + text_offset + gadget, *(double *)(&text_section[gadget]));
-        if (!write_memory_int(base_address + text_offset + patch_place + 4, gadget - patch_place - 8))
+        if (
+            !write_memory_byte(base_address + text_offset + patch_place +  7, 0x0F) || // <
+            !write_memory_byte(base_address + text_offset + patch_place +  8, 0x57) || // < xorps xmm0, xmm0
+            !write_memory_byte(base_address + text_offset + patch_place +  9, 0xC0) || // <
+            !write_memory_byte(base_address + text_offset + patch_place + 10, 0x90) || // nop
+            !write_memory_byte(base_address + text_offset + patch_place + 11, 0x90)    // nop
+        )
         {
             LOG_ERROR("Unable to patch loginwindow memory");
             continue;
